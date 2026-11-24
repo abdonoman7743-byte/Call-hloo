@@ -143,6 +143,17 @@ export async function POST(req: Request) {
         .where(eq(calls.id, callId))
         .limit(1);
 
+      if (
+        existingCall &&
+        existingCall.callerId !== auth.sub &&
+        existingCall.calleeId !== auth.sub
+      ) {
+        return NextResponse.json(
+          { error: "المكالمة غير موجودة" },
+          { status: 404 }
+        );
+      }
+
       if (existingCall) {
         const nowIso = new Date().toISOString();
         const sig: SignalingJsonLog = existingCall.signalingJson ?? {

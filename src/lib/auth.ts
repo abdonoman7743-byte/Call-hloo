@@ -1,8 +1,17 @@
 import { SignJWT, jwtVerify } from "jose";
 import bcrypt from "bcryptjs";
 
+// A hard-coded fallback would let anyone forge login tokens, so production
+// requires JWT_SECRET. The fallback exists only for local development.
 const rawSecret =
-  process.env.JWT_SECRET || "oboud-call-studio-hs256-jwt-secret-key-2026";
+  process.env.JWT_SECRET ||
+  (process.env.NODE_ENV === "production" &&
+  process.env.NEXT_PHASE !== "phase-production-build"
+    ? ""
+    : "dev-only-insecure-jwt-secret-do-not-use-in-production");
+if (!rawSecret) {
+  throw new Error("JWT_SECRET is required in production");
+}
 const secretKey = new TextEncoder().encode(rawSecret);
 
 export interface JwtPayloadData {
