@@ -8,11 +8,12 @@ import {
   users,
 } from "@/db/schema";
 import { ensureSeeded } from "@/lib/seed";
-import { count, desc, eq } from "drizzle-orm";
+import { authenticateRequest } from "@/lib/auth";
+import { count, desc, eq, or } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     await ensureSeeded();
 
@@ -29,11 +30,22 @@ export async function GET() {
           .where(eq(users.presenceStatus, "online")),
       ]);
 
-    const recentCalls = await db
-      .select()
-      .from(calls)
-      .orderBy(desc(calls.createdAt))
-      .limit(5);
+    // Call rows carry user ids and WebRTC signaling data, so only the
+    // signed-in user's own calls are returned (never other users' calls).
+    const auth = await authenticateRequest(req);
+    const recentCalls = auth
+      ? (
+          await db
+            .select()
+            .from(calls)
+            .where(or(eq(calls.callerId, auth.sub), eq(calls.calleeId, auth.sub)))
+            .orderBy(desc(calls.createdAt))
+            .limit(5)
+        ).map(({ signalingJson: _signalingJson, ...rest }) => {
+          void _signalingJson;
+          return rest;
+        })
+      : [];
 
     return NextResponse.json({
       metrics: {

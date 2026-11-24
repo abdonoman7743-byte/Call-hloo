@@ -97,10 +97,22 @@ export async function PATCH(req: Request) {
         ? body.groupTag.trim()
         : existing.groupTag;
 
-    const avatarUrl =
-      typeof body.avatarUrl === "string" && body.avatarUrl.trim()
-        ? body.avatarUrl.trim()
-        : existing.avatarUrl;
+    const candidateAvatar =
+      typeof body.avatarUrl === "string" ? body.avatarUrl.trim() : "";
+    // Only http(s) and inline image data URLs are accepted (no javascript: etc).
+    if (
+      candidateAvatar &&
+      (candidateAvatar.length > 3_000_000 ||
+        !/^(https?:\/\/|data:image\/(png|jpe?g|gif|webp|svg\+xml)[;,])/i.test(
+          candidateAvatar
+        ))
+    ) {
+      return NextResponse.json(
+        { error: "رابط الصورة الشخصية غير صالح" },
+        { status: 400 }
+      );
+    }
+    const avatarUrl = candidateAvatar ? candidateAvatar : existing.avatarUrl;
 
     const validPresence = ["online", "unavailable", "in_call", "offline", "busy"];
     const normalizedPresence =

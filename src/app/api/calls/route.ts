@@ -256,6 +256,14 @@ export async function PATCH(req: Request) {
       );
     }
 
+    // Only the two call participants may modify a call.
+    if (existing.callerId !== auth.sub && existing.calleeId !== auth.sub) {
+      return NextResponse.json(
+        { error: "المكالمة غير موجودة" },
+        { status: 404 }
+      );
+    }
+
     const nowIso = new Date().toISOString();
     const currentSig: SignalingJsonLog = existing.signalingJson ?? {
       iceCandidates: [],
