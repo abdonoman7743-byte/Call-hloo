@@ -7,7 +7,6 @@ import {
   CheckCheck,
   Compass,
   Image as ImageIcon,
-  Layers,
   Loader2,
   LogOut,
   MessageSquare,
