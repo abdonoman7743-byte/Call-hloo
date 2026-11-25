@@ -9,12 +9,14 @@ import {
   recordAuditLog,
 } from "@/lib/privacy-search";
 import { ensureSeeded } from "@/lib/seed";
+import { roleForUser, SESSION_COOKIE } from "@/lib/roles";
 import { eq, or, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 function formatOwnUser(u: typeof users.$inferSelect) {
   return {
+    role: roleForUser(u),
     id: u.id,
     username: u.username,
     firstName: u.firstName || u.displayName.trim().split(/\s+/)[0] || null,
@@ -119,10 +121,12 @@ export async function POST(req: Request) {
       req,
     });
 
-    return NextResponse.json({
+    const res = NextResponse.json({
       token,
       user: formatOwnUser(found),
     });
+    res.cookies.set("oboud_jwt", token, SESSION_COOKIE);
+    return res;
   } catch (error) {
     console.error("POST /api/auth/login error:", error);
     return NextResponse.json(

@@ -18,6 +18,7 @@ export const PUBLIC_TEAM_GROUP_ID = "00000000-0000-0000-0000-000000000b0d";
 
 export interface PublicUser {
   id: string;
+  role?: "OWNER" | "SUBSCRIBER";
   username: string;
   firstName?: string | null;
   displayName: string;
