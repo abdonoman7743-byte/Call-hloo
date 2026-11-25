@@ -1635,21 +1635,6 @@ export function OboudCallWorkspace({
             <span>سجل المكالمات</span>
           </button>
 
-          {currentUser?.role === "OWNER" && (
-          <button
-            type="button"
-            onClick={() => { window.location.href = "/owner/architecture"; }}
-            className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-bold transition cursor-pointer ${
-              activeNav === "architecture"
-                ? "bg-white text-slate-900 shadow-2xs"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-          >
-            <Layers className="w-4 h-4 text-amber-600" />
-            <span>المعمارية</span>
-          </button>
-          )}
-
           <button
             type="button"
             onClick={() => setActiveNav("profile")}
@@ -2281,21 +2266,6 @@ export function OboudCallWorkspace({
             <Phone className="w-5 h-5" />
             <span>المكالمات</span>
           </button>
-
-          {currentUser?.role === "OWNER" && (
-          <button
-            type="button"
-            onClick={() => { window.location.href = "/owner/architecture"; }}
-            className={`flex flex-col items-center justify-center gap-1 text-[10px] font-extrabold transition cursor-pointer ${
-              activeNav === "architecture"
-                ? "text-amber-600"
-                : "text-slate-500"
-            }`}
-          >
-            <Layers className="w-5 h-5" />
-            <span>المعمارية</span>
-          </button>
-          )}
 
           <button
             type="button"
