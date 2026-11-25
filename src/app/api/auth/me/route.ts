@@ -3,12 +3,14 @@ import { db } from "@/db";
 import { DEFAULT_PRIVACY_SETTINGS, users } from "@/db/schema";
 import { authenticateRequest, getTokenFromRequest } from "@/lib/auth";
 import { ensureSeeded } from "@/lib/seed";
+import { roleForUser } from "@/lib/roles";
 import { eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 function sanitizeOwnUser(u: typeof users.$inferSelect) {
   return {
+    role: roleForUser(u),
     id: u.id,
     username: u.username,
     firstName: u.firstName || u.displayName.trim().split(/\s+/)[0] || null,

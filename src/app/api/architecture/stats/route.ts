@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import {
+  auditLogs,
   calls,
   friends,
   messages,
@@ -8,12 +9,19 @@ import {
   users,
 } from "@/db/schema";
 import { ensureSeeded } from "@/lib/seed";
-import { authenticateRequest } from "@/lib/auth";
-import { count, desc, eq, or } from "drizzle-orm";
+import { requireOwner } from "@/lib/roles";
+import { count, desc, eq, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const owner = await requireOwner(req);
+  if (owner.status !== 200) {
+    return NextResponse.json(
+      { error: owner.status === 401 ? "غير مصرح" : "ممنوع" },
+      { status: owner.status }
+    );
+  }
   try {
     await ensureSeeded();
 
@@ -30,22 +38,28 @@ export async function GET(req: Request) {
           .where(eq(users.presenceStatus, "online")),
       ]);
 
-    // Call rows carry user ids and WebRTC signaling data, so only the
-    // signed-in user's own calls are returned (never other users' calls).
-    const auth = await authenticateRequest(req);
-    const recentCalls = auth
-      ? (
-          await db
-            .select()
-            .from(calls)
-            .where(or(eq(calls.callerId, auth.sub), eq(calls.calleeId, auth.sub)))
-            .orderBy(desc(calls.createdAt))
-            .limit(5)
-        ).map(({ signalingJson: _signalingJson, ...rest }) => {
-          void _signalingJson;
-          return rest;
-        })
-      : [];
+    // Owner only: recent calls (signaling payloads stripped) and audit logs.
+    const recentCalls = (
+      await db.select().from(calls).orderBy(desc(calls.createdAt)).limit(10)
+    ).map(({ signalingJson: _s, ...rest }) => {
+      void _s;
+      return rest;
+    });
+    const [activeCalls] = await db
+      .select({ value: count() })
+      .from(calls)
+      .where(sql`${calls.status} in ('ringing','answered')`);
+    const recentLogs = await db
+      .select({
+        action: auditLogs.action,
+        ipHint: auditLogs.ipHint,
+        metadata: auditLogs.metadata,
+        createdAt: auditLogs.createdAt,
+      })
+      .from(auditLogs)
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(50);
+    const [pg] = await db.execute(sql`select version() as v`).then((r) => r.rows);
 
     return NextResponse.json({
       metrics: {
@@ -66,6 +80,11 @@ export async function GET(req: Request) {
         authHandshake: "JWT HS256 + bcryptjs (cost=10)",
       },
       recentCalls,
+      webrtc: { activeCalls: activeCalls?.value ?? 0 },
+      postgres: { version: (pg as { v?: string } | undefined)?.v ?? null },
+      recentLogs,
+      uptimeSec: Math.round(process.uptime()),
+      memoryMb: Math.round(process.memoryUsage().rss / 1048576),
       checkedAt: new Date().toISOString(),
     });
   } catch (error) {

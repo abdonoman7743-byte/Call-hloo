@@ -49,7 +49,6 @@ import { AuthSwitcherModal } from "./AuthSwitcherModal";
 import { SafeFriendSearchView } from "./SafeFriendSearchView";
 import { NotificationsSheet } from "./NotificationsSheet";
 import { CallHistoryView } from "./CallHistoryView";
-import { ArchitectureStudioView } from "./ArchitectureStudioView";
 import { MobileAuthPage } from "./MobileAuthPage";
 import { ProfileSettingsView } from "./ProfileSettingsView";
 
@@ -1636,9 +1635,10 @@ export function OboudCallWorkspace({
             <span>سجل المكالمات</span>
           </button>
 
+          {currentUser?.role === "OWNER" && (
           <button
             type="button"
-            onClick={() => setActiveNav("architecture")}
+            onClick={() => { window.location.href = "/owner/architecture"; }}
             className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-bold transition cursor-pointer ${
               activeNav === "architecture"
                 ? "bg-white text-slate-900 shadow-2xs"
@@ -1648,6 +1648,7 @@ export function OboudCallWorkspace({
             <Layers className="w-4 h-4 text-amber-600" />
             <span>المعمارية</span>
           </button>
+          )}
 
           <button
             type="button"
@@ -2219,19 +2220,6 @@ export function OboudCallWorkspace({
           />
         )}
 
-        {activeNav === "architecture" && (
-          <ArchitectureStudioView
-            onStartQuickDemoCall={() => {
-              const target =
-                (!selectedPeer?.isGroup && selectedPeer) ||
-                friends[0] ||
-                demoUsers.find((u) => u.id !== currentUser.id);
-              if (target) {
-                startOutgoingCall(target, "video");
-              }
-            }}
-          />
-        )}
 
         {activeNav === "profile" && (
           <ProfileSettingsView
@@ -2294,9 +2282,10 @@ export function OboudCallWorkspace({
             <span>المكالمات</span>
           </button>
 
+          {currentUser?.role === "OWNER" && (
           <button
             type="button"
-            onClick={() => setActiveNav("architecture")}
+            onClick={() => { window.location.href = "/owner/architecture"; }}
             className={`flex flex-col items-center justify-center gap-1 text-[10px] font-extrabold transition cursor-pointer ${
               activeNav === "architecture"
                 ? "text-amber-600"
@@ -2306,6 +2295,7 @@ export function OboudCallWorkspace({
             <Layers className="w-5 h-5" />
             <span>المعمارية</span>
           </button>
+          )}
 
           <button
             type="button"

@@ -283,7 +283,7 @@ const SIGNALING_STEPS = [
 export function ArchitectureStudioView({
   onStartQuickDemoCall,
 }: {
-  onStartQuickDemoCall: () => void;
+  onStartQuickDemoCall?: () => void;
 }) {
   const [stats, setStats] = useState<ArchStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -374,14 +374,14 @@ export function ArchitectureStudioView({
             />
             <span>تحديث المقاييس الحية</span>
           </button>
-          <button
+          {onStartQuickDemoCall && <button
             type="button"
             onClick={onStartQuickDemoCall}
             className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-4 py-2.5 text-xs font-bold text-white shadow-xs transition cursor-pointer"
           >
             <Video className="w-4 h-4" />
             <span>اختبار مكالمة WebRTC حية الآن</span>
-          </button>
+          </button>}
         </div>
       </div>
 
