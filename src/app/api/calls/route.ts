@@ -8,6 +8,7 @@ import {
   type SignalingJsonLog,
 } from "@/db/schema";
 import { authenticateRequest } from "@/lib/auth";
+import { notifyUser } from "@/lib/signal-bus";
 import {
   broadcastGlobalRealtimeEvent,
   getResolvedPrivacy,
@@ -215,6 +216,7 @@ export async function POST(req: Request) {
           },
         },
       });
+      notifyUser(calleeId);
     }
 
     return NextResponse.json({ call: created }, { status: 201 });

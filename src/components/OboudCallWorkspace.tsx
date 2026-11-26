@@ -42,6 +42,16 @@ import {
   type ManagedMediaResult,
 } from "@/lib/webrtc-media";
 import {
+  applyCodecPreferences,
+  buildRtcConfig,
+  hasTurnConfigured,
+  lowLatencyReceivers,
+  sampleStats,
+  tuneSenders,
+  VIDEO_TIERS,
+  type NetQuality,
+} from "@/lib/webrtc-quality";
+import {
   CallStageOverlay,
   type LiveSignalLogEntry,
 } from "./CallStageOverlay";
@@ -52,12 +62,7 @@ import { CallHistoryView } from "./CallHistoryView";
 import { MobileAuthPage } from "./MobileAuthPage";
 import { ProfileSettingsView } from "./ProfileSettingsView";
 
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-  ],
-};
+const RTC_CONFIG: RTCConfiguration = buildRtcConfig();
 
 const TEAM_GROUP_CONTACT: FriendContact = {
   id: PUBLIC_TEAM_GROUP_ID,
@@ -179,6 +184,9 @@ export function OboudCallWorkspace({
       | "Loopback P2P";
     iceState: string;
     rttMs: number;
+    quality?: NetQuality;
+    lossPct?: number;
+    videoTier?: number;
   } | null>(null);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -196,6 +204,10 @@ export function OboudCallWorkspace({
   const pendingIceQueueRef = useRef<RTCIceCandidateInit[]>([]);
   const autoAnswerTimerRef = useRef<number | null>(null);
   const statsIntervalRef = useRef<number | null>(null);
+  const recoveryTimerRef = useRef<number | null>(null);
+  const iceFailuresRef = useRef(0);
+  const startingCallRef = useRef(false);
+  const forceIceRestartRef = useRef<(() => void) | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -413,9 +425,20 @@ export function OboudCallWorkspace({
       window.clearInterval(statsIntervalRef.current);
       statsIntervalRef.current = null;
     }
+    if (recoveryTimerRef.current) {
+      window.clearTimeout(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+    iceFailuresRef.current = 0;
+    forceIceRestartRef.current = null;
     if (localPcRef.current) {
+      const oldPc = localPcRef.current;
+      oldPc.onicecandidate = null;
+      oldPc.ontrack = null;
+      oldPc.oniceconnectionstatechange = null;
+      oldPc.onconnectionstatechange = null;
       try {
-        localPcRef.current.close();
+        oldPc.close();
       } catch {
         // ignore
       }
@@ -443,41 +466,155 @@ export function OboudCallWorkspace({
     setActiveCall(null);
   }, []);
 
-  // Poll RTCPeerConnection stats when call is connected
+  const sendSignal = useCallback(
+    (
+      toUserId: string,
+      callId: string | null,
+      eventType: string,
+      payload: Record<string, unknown> = {}
+    ) =>
+      fetch("/api/signaling", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ toUserId, callId, eventType, payload }),
+        keepalive: eventType === "call-end",
+      }).catch(() => {}),
+    [authHeaders]
+  );
+
+  // Real network telemetry (getStats) + adaptive video bitrate ladder
   const startStatsTelemetry = useCallback((pc: RTCPeerConnection) => {
     if (statsIntervalRef.current) {
       window.clearInterval(statsIntervalRef.current);
     }
+    let prev = { bytes: 0, at: 0, lost: 0, recv: 0 };
+    let tier = 0;
+    let goodStreak = 0;
+    let busy = false;
     statsIntervalRef.current = window.setInterval(async () => {
+      if (busy || document.hidden) return;
+      busy = true;
       try {
-        const report = await pc.getStats();
-        let measuredRtt = 18;
-        report.forEach((stat) => {
-          if (
-            stat.type === "candidate-pair" &&
-            stat.state === "succeeded" &&
-            typeof stat.currentRoundTripTime === "number"
-          ) {
-            measuredRtt = Math.max(
-              2,
-              Math.round(stat.currentRoundTripTime * 1000)
-            );
-          }
-        });
-        setActiveCall((prev) =>
-          prev
+        const { sample, next } = await sampleStats(pc, prev);
+        prev = next;
+
+        // Adaptive bitrate: step down fast on poor network, step up slowly when stable.
+        let nextTier = tier;
+        if (sample.quality === "bad") nextTier = Math.min(VIDEO_TIERS.length - 1, tier + 2);
+        else if (sample.quality === "poor") nextTier = Math.min(VIDEO_TIERS.length - 1, tier + 1);
+        else if (sample.quality === "excellent") {
+          goodStreak += 1;
+          if (goodStreak >= 3) nextTier = Math.max(0, tier - 1);
+        }
+        if (sample.quality !== "excellent") goodStreak = 0;
+        if (nextTier !== tier) {
+          tier = nextTier;
+          goodStreak = 0;
+          await tuneSenders(pc, tier);
+        }
+
+        setActiveCall((prevCall) =>
+          prevCall
             ? {
-                ...prev,
-                iceState: pc.iceConnectionState || "connected",
-                rttMs: measuredRtt,
+                ...prevCall,
+                iceState: pc.iceConnectionState || prevCall.iceState,
+                rttMs: sample.rttMs ?? prevCall.rttMs,
+                quality: sample.quality,
+                lossPct: Math.round(sample.lossPct * 10) / 10,
+                videoTier: tier,
+                transportMode:
+                  prevCall.transportMode === "Loopback P2P"
+                    ? prevCall.transportMode
+                    : sample.relay
+                    ? "TURN Relay (TLS 5349)"
+                    : "P2P Direct (STUN)",
               }
             : null
         );
       } catch {
         // ignore
+      } finally {
+        busy = false;
       }
     }, 2000);
   }, []);
+
+  // ICE failure recovery: restart ICE (caller) and fall back to TURN relay when direct P2P fails
+  const attachRecovery = useCallback(
+    (pc: RTCPeerConnection, role: "caller" | "callee") => {
+      const recover = (immediate: boolean) => {
+        if (recoveryTimerRef.current) return;
+        recoveryTimerRef.current = window.setTimeout(
+          async () => {
+            recoveryTimerRef.current = null;
+            if (localPcRef.current !== pc) return;
+            if (
+              pc.iceConnectionState === "connected" ||
+              pc.iceConnectionState === "completed"
+            )
+              return;
+            const cur = activeCallRef.current;
+            if (!cur?.callId) return;
+            iceFailuresRef.current += 1;
+            if (iceFailuresRef.current > 6) return;
+            if (role === "callee") {
+              sendSignal(cur.peer.id, cur.callId, "ice-restart-request");
+              return;
+            }
+            const relay = iceFailuresRef.current >= 2 && hasTurnConfigured();
+            try {
+              if (relay) pc.setConfiguration(buildRtcConfig(true));
+              pc.restartIce();
+              const offer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(offer);
+              sendSignal(cur.peer.id, cur.callId, "call-renegotiate", {
+                sdp: { type: offer.type, sdp: offer.sdp },
+                relay,
+              });
+            } catch {
+              // will retry on next state change
+            }
+          },
+          immediate ? 0 : 2000
+        );
+      };
+      if (role === "caller") forceIceRestartRef.current = () => recover(true);
+
+      pc.oniceconnectionstatechange = () => {
+        const st = pc.iceConnectionState;
+        setActiveCall((prev) => (prev ? { ...prev, iceState: st } : null));
+        if (st === "connected" || st === "completed") {
+          iceFailuresRef.current = 0;
+          if (recoveryTimerRef.current) {
+            window.clearTimeout(recoveryTimerRef.current);
+            recoveryTimerRef.current = null;
+          }
+        } else if (st === "disconnected") {
+          recover(false);
+        } else if (st === "failed") {
+          recover(true);
+        }
+      };
+    },
+    [sendSignal]
+  );
+
+  // Network came back (wifi <-> mobile switch): restart ICE immediately
+  useEffect(() => {
+    const onOnline = () => {
+      const pc = localPcRef.current;
+      if (!pc || !activeCallRef.current) return;
+      if (pc.iceConnectionState !== "connected" && pc.iceConnectionState !== "completed") {
+        if (forceIceRestartRef.current) forceIceRestartRef.current();
+        else if (activeCallRef.current.callId)
+          sendSignal(activeCallRef.current.peer.id, activeCallRef.current.callId, "ice-restart-request");
+      } else if (forceIceRestartRef.current) {
+        forceIceRestartRef.current();
+      }
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [sendSignal]);
 
   // Dual-Peer Loopback Responder
   const triggerLoopbackPeerAnswer = useCallback(async () => {
@@ -600,104 +737,106 @@ export function OboudCallWorkspace({
   const startOutgoingCall = useCallback(
     async (peer: PublicUser, callType: "video" | "audio") => {
       if (!currentUser || !jwtRef.current) return;
-      cleanupWebRtcResources();
-      setIncomingInvite(null);
-      setSignalLogs([]);
-
-      playStudioTone("ring");
-      appendSignalLog(
-        "sys",
-        "Acquiring Media Devices",
-        `getUserMedia({ audio: true, video: ${callType === "video"} })`
-      );
-
-      const localMedia = await acquireUserOrSyntheticStream(
-        callType,
-        currentUser.displayName
-      );
-      localMediaCleanupRef.current = localMedia;
-      setLocalStream(localMedia.stream);
-
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      localPcRef.current = pc;
-
-      const inboundStream = new MediaStream();
-      setRemoteStream(inboundStream);
-
-      pc.ontrack = (event) => {
-        if (event.streams?.[0]) {
-          setRemoteStream(event.streams[0]);
-        } else {
-          inboundStream.addTrack(event.track);
-          setRemoteStream(new MediaStream(inboundStream.getTracks()));
-        }
-      };
-
-      localMedia.stream.getTracks().forEach((track) => {
-        pc.addTrack(track, localMedia.stream);
-      });
-
-      setActiveCall({
-        callId: null,
-        peer,
-        callType,
-        phase: "ringing",
-        startedAtMs: null,
-        isMuted: false,
-        isCameraOff: false,
-        isScreenSharing: false,
-        isSyntheticLocal: localMedia.isSynthetic,
-        transportMode: "P2P Direct (STUN)",
-        iceState: "checking",
-        rttMs: 19,
-      });
-
-      let createdCallId: string | null = null;
-
-      pc.onicecandidate = async (ev) => {
-        if (!ev.candidate) return;
-        appendSignalLog("out", "ICE Candidate (Local)", ev.candidate.candidate);
-        if (createdCallId) {
-          try {
-            await fetch("/api/signaling", {
-              method: "POST",
-              headers: authHeaders(),
-              body: JSON.stringify({
-                toUserId: peer.id,
-                callId: createdCallId,
-                eventType: "ice-candidate",
-                payload: {
-                  candidate: ev.candidate.toJSON(),
-                },
-              }),
-            });
-          } catch {
-            // ignore
-          }
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
-          setActiveCall((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  phase: "connected",
-                  startedAtMs: prev.startedAtMs ?? Date.now(),
-                  iceState: "connected",
-                }
-              : null
-          );
-        }
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      appendSignalLog("out", "SDP Offer Created", offer.sdp?.slice(0, 260));
-
+      if (activeCallRef.current || startingCallRef.current) return; // de-duplicate taps
+      startingCallRef.current = true;
       try {
-        const res = await fetch("/api/calls", {
+        cleanupWebRtcResources();
+        setIncomingInvite(null);
+        setSignalLogs([]);
+
+        playStudioTone("ring");
+        appendSignalLog(
+          "sys",
+          "Acquiring Media Devices",
+          `getUserMedia({ audio: true, video: ${callType === "video"} })`
+        );
+
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        localPcRef.current = pc;
+
+        // Start camera/mic in parallel with offer creation; the offer does not need the tracks.
+        const mediaPromise = acquireUserOrSyntheticStream(
+          callType,
+          currentUser.displayName
+        );
+
+        const inboundStream = new MediaStream();
+        setRemoteStream(inboundStream);
+        pc.ontrack = (event) => {
+          if (event.streams?.[0]) {
+            setRemoteStream(event.streams[0]);
+          } else {
+            inboundStream.addTrack(event.track);
+            setRemoteStream(new MediaStream(inboundStream.getTracks()));
+          }
+          lowLatencyReceivers(pc);
+        };
+
+        pc.addTransceiver("audio", { direction: "sendrecv" });
+        if (callType === "video") {
+          pc.addTransceiver("video", { direction: "sendrecv" });
+        }
+        applyCodecPreferences(pc);
+
+        setActiveCall({
+          callId: null,
+          peer,
+          callType,
+          phase: "ringing",
+          startedAtMs: null,
+          isMuted: false,
+          isCameraOff: false,
+          isScreenSharing: false,
+          isSyntheticLocal: false,
+          transportMode: "P2P Direct (STUN)",
+          iceState: "checking",
+          rttMs: 19,
+        });
+
+        let createdCallId: string | null = null;
+        const earlyIce: RTCIceCandidateInit[] = [];
+        const postIce = (cand: RTCIceCandidateInit) =>
+          fetch("/api/signaling", {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify({
+              toUserId: peer.id,
+              callId: createdCallId,
+              eventType: "ice-candidate",
+              payload: { candidate: cand },
+            }),
+          }).catch(() => {});
+
+        pc.onicecandidate = (ev) => {
+          if (!ev.candidate) return;
+          appendSignalLog("out", "ICE Candidate (Local)", ev.candidate.candidate);
+          // Candidates gathered before the call row exists are queued, not dropped.
+          if (createdCallId) postIce(ev.candidate.toJSON());
+          else earlyIce.push(ev.candidate.toJSON());
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === "connected") {
+            setActiveCall((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    phase: "connected",
+                    startedAtMs: prev.startedAtMs ?? Date.now(),
+                    iceState: "connected",
+                  }
+                : null
+            );
+          }
+        };
+        attachRecovery(pc, "caller");
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        appendSignalLog("out", "SDP Offer Created", offer.sdp?.slice(0, 260));
+
+        // Ring the callee immediately; media attaches via replaceTrack once ready.
+        const callPost = fetch("/api/calls", {
           method: "POST",
           headers: authHeaders(),
           body: JSON.stringify({
@@ -707,34 +846,67 @@ export function OboudCallWorkspace({
             transportMode: "P2P Direct (STUN)",
           }),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          cleanupWebRtcResources();
-          setCallErrorBanner(
-            data.error || "صلاحيات خصوصية هذا الحساب لا تسمح بالاتصال المباشر"
-          );
-          window.setTimeout(() => setCallErrorBanner(null), 4000);
+
+        const localMedia = await mediaPromise;
+        if (localPcRef.current !== pc) {
+          // call was cancelled while media was starting
+          localMedia.cleanup();
           return;
         }
-        createdCallId = data.call?.id ?? null;
+        localMediaCleanupRef.current = localMedia;
+        setLocalStream(localMedia.stream);
         setActiveCall((prev) =>
-          prev ? { ...prev, callId: createdCallId } : null
+          prev ? { ...prev, isSyntheticLocal: localMedia.isSynthetic } : null
         );
-      } catch {
-        // ignore
-      }
-
-      autoAnswerTimerRef.current = window.setTimeout(() => {
-        if (
-          activeCallRef.current &&
-          activeCallRef.current.phase === "ringing"
-        ) {
-          triggerLoopbackPeerAnswer();
+        for (const track of localMedia.stream.getTracks()) {
+          const tr = pc
+            .getTransceivers()
+            .find((t) => t.receiver.track.kind === track.kind && !t.sender.track);
+          if (tr) {
+            await tr.sender.replaceTrack(track);
+            tr.sender.setStreams(localMedia.stream);
+          }
         }
-      }, 3500);
+        void tuneSenders(pc, 0);
+
+        try {
+          const res = await callPost;
+          const data = await res.json();
+          if (!res.ok) {
+            cleanupWebRtcResources();
+            setCallErrorBanner(
+              data.error || "صلاحيات خصوصية هذا الحساب لا تسمح بالاتصال المباشر"
+            );
+            window.setTimeout(() => setCallErrorBanner(null), 4000);
+            return;
+          }
+          createdCallId = data.call?.id ?? null;
+          setActiveCall((prev) =>
+            prev ? { ...prev, callId: createdCallId } : null
+          );
+          earlyIce.splice(0).forEach((c) => void postIce(c));
+        } catch {
+          // ignore
+        }
+
+        // Simulated responder only for peers who are not online (a real online peer is left to answer).
+        if (peer.presenceStatus !== "online" && peer.presenceStatus !== "in_call") {
+          autoAnswerTimerRef.current = window.setTimeout(() => {
+            if (
+              activeCallRef.current &&
+              activeCallRef.current.phase === "ringing"
+            ) {
+              triggerLoopbackPeerAnswer();
+            }
+          }, 3500);
+        }
+      } finally {
+        startingCallRef.current = false;
+      }
     },
     [
       appendSignalLog,
+      attachRecovery,
       authHeaders,
       cleanupWebRtcResources,
       currentUser,
@@ -747,7 +919,10 @@ export function OboudCallWorkspace({
     if (!incomingInvite || !currentUser) return;
     const invite = incomingInvite;
     setIncomingInvite(null);
+    // ICE candidates that arrived while ringing must survive the cleanup below.
+    const earlyRemoteIce = [...pendingIceQueueRef.current];
     cleanupWebRtcResources();
+    pendingIceQueueRef.current = earlyRemoteIce;
     setSignalLogs([]);
 
     appendSignalLog(
@@ -756,12 +931,11 @@ export function OboudCallWorkspace({
       invite.offer?.sdp?.slice(0, 240)
     );
 
-    const localMedia = await acquireUserOrSyntheticStream(
+    // Camera/mic start while the remote offer is applied.
+    const mediaPromise = acquireUserOrSyntheticStream(
       invite.callType,
       currentUser.displayName
     );
-    localMediaCleanupRef.current = localMedia;
-    setLocalStream(localMedia.stream);
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
     localPcRef.current = pc;
@@ -776,30 +950,33 @@ export function OboudCallWorkspace({
         inboundStream.addTrack(event.track);
         setRemoteStream(new MediaStream(inboundStream.getTracks()));
       }
+      lowLatencyReceivers(pc);
     };
 
-    localMedia.stream.getTracks().forEach((track) => {
-      pc.addTrack(track, localMedia.stream);
-    });
-
-    pc.onicecandidate = async (ev) => {
+    pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
       appendSignalLog("out", "ICE Candidate (Callee)", ev.candidate.candidate);
-      try {
-        await fetch("/api/signaling", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            toUserId: invite.caller.id,
-            callId: invite.callId,
-            eventType: "ice-candidate",
-            payload: { candidate: ev.candidate.toJSON() },
-          }),
-        });
-      } catch {
-        // ignore
+      void sendSignal(invite.caller.id, invite.callId, "ice-candidate", {
+        candidate: ev.candidate.toJSON(),
+      });
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        playStudioTone("connect");
+        setActiveCall((prev) =>
+          prev
+            ? {
+                ...prev,
+                phase: "connected",
+                startedAtMs: Date.now(),
+                iceState: "connected",
+              }
+            : null
+        );
       }
     };
+    attachRecovery(pc, "callee");
 
     const peerObj: PublicUser = {
       id: invite.caller.id,
@@ -816,11 +993,11 @@ export function OboudCallWorkspace({
       peer: peerObj,
       callType: invite.callType,
       phase: "connecting",
-      startedAtMs: Date.now(),
+      startedAtMs: null,
       isMuted: false,
       isCameraOff: false,
       isScreenSharing: false,
-      isSyntheticLocal: localMedia.isSynthetic,
+      isSyntheticLocal: false,
       transportMode: "P2P Direct (STUN)",
       iceState: "checking",
       rttMs: 16,
@@ -828,49 +1005,58 @@ export function OboudCallWorkspace({
 
     if (invite.offer) {
       await pc.setRemoteDescription(new RTCSessionDescription(invite.offer));
-      for (const queued of pendingIceQueueRef.current) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(queued));
-        } catch {
-          // ignore
-        }
-      }
+      const queued = pendingIceQueueRef.current;
       pendingIceQueueRef.current = [];
+      await Promise.all(
+        queued.map((c) =>
+          pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+        )
+      );
+    }
 
+    const localMedia = await mediaPromise;
+    if (localPcRef.current !== pc) {
+      localMedia.cleanup();
+      return;
+    }
+    localMediaCleanupRef.current = localMedia;
+    setLocalStream(localMedia.stream);
+    setActiveCall((prev) =>
+      prev ? { ...prev, isSyntheticLocal: localMedia.isSynthetic } : null
+    );
+
+    for (const track of localMedia.stream.getTracks()) {
+      const tr = pc
+        .getTransceivers()
+        .find((t) => t.receiver.track.kind === track.kind && !t.sender.track);
+      if (tr) {
+        tr.direction = "sendrecv";
+        await tr.sender.replaceTrack(track);
+        tr.sender.setStreams(localMedia.stream);
+      } else {
+        pc.addTrack(track, localMedia.stream);
+      }
+    }
+    applyCodecPreferences(pc);
+
+    if (invite.offer) {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       appendSignalLog("out", "SDP Answer Sent", answer.sdp?.slice(0, 240));
-
-      await fetch("/api/signaling", {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({
-          toUserId: invite.caller.id,
-          callId: invite.callId,
-          eventType: "call-answer",
-          payload: { sdp: { type: answer.type, sdp: answer.sdp } },
-        }),
+      void tuneSenders(pc, 0);
+      await sendSignal(invite.caller.id, invite.callId, "call-answer", {
+        sdp: { type: answer.type, sdp: answer.sdp },
       });
     }
 
-    playStudioTone("connect");
-    setActiveCall((prev) =>
-      prev
-        ? {
-            ...prev,
-            phase: "connected",
-            startedAtMs: Date.now(),
-            iceState: "connected",
-          }
-        : null
-    );
     startStatsTelemetry(pc);
   }, [
     appendSignalLog,
-    authHeaders,
+    attachRecovery,
     cleanupWebRtcResources,
     currentUser,
     incomingInvite,
+    sendSignal,
     startStatsTelemetry,
   ]);
 
@@ -899,12 +1085,16 @@ export function OboudCallWorkspace({
   const hangupActiveCall = useCallback(async () => {
     const current = activeCallRef.current;
     playStudioTone("end");
-    cleanupWebRtcResources();
+    cleanupWebRtcResources(); // UI and devices released instantly
 
     if (current) {
-      try {
-        if (current.callId) {
-          await fetch("/api/calls", {
+      // Notify the peer first and in parallel with the DB update.
+      const tasks: Promise<unknown>[] = [
+        sendSignal(current.peer.id, current.callId, "call-end"),
+      ];
+      if (current.callId) {
+        tasks.push(
+          fetch("/api/calls", {
             method: "PATCH",
             headers: authHeaders(),
             body: JSON.stringify({
@@ -916,24 +1106,13 @@ export function OboudCallWorkspace({
                 detail: "تم إنهاء المكالمة وإغلاق جلسة RTCPeerConnection",
               },
             }),
-          });
-        }
-        await fetch("/api/signaling", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            toUserId: current.peer.id,
-            callId: current.callId,
-            eventType: "call-end",
-            payload: {},
-          }),
-        });
-      } catch {
-        // ignore
+          }).catch(() => {})
+        );
       }
-      await loadCallHistory();
+      await Promise.all(tasks);
+      void loadCallHistory();
     }
-  }, [authHeaders, cleanupWebRtcResources, loadCallHistory]);
+  }, [authHeaders, cleanupWebRtcResources, loadCallHistory, sendSignal]);
 
   // Handle incoming real-time signaling event
   const handleSignalingEvent = useCallback(
@@ -1015,27 +1194,58 @@ export function OboudCallWorkspace({
             sdp.sdp?.slice(0, 240)
           );
           await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-          for (const queued of pendingIceQueueRef.current) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(queued));
-            } catch {
-              // ignore
-            }
-          }
+          const queued = pendingIceQueueRef.current;
           pendingIceQueueRef.current = [];
-          playStudioTone("connect");
-          setActiveCall((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  phase: "connected",
-                  startedAtMs: Date.now(),
-                  iceState: "connected",
-                }
-              : null
+          await Promise.all(
+            queued.map((c) =>
+              pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+            )
           );
+          // Real state: "connected" is set by onconnectionstatechange once media flows.
+          setActiveCall((prev) =>
+            prev && prev.phase === "ringing"
+              ? { ...prev, phase: "connecting" }
+              : prev
+          );
+          if (pc.connectionState === "connected") {
+            playStudioTone("connect");
+          }
           startStatsTelemetry(pc);
         }
+        return;
+      }
+
+      if (eventType === "call-renegotiate") {
+        const pc = localPcRef.current;
+        const sdp = payload.sdp as RTCSessionDescriptionInit | undefined;
+        const cur = activeCallRef.current;
+        if (pc && sdp && cur?.callId) {
+          try {
+            if (payload.relay) pc.setConfiguration(buildRtcConfig(true));
+            await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await sendSignal(ev.fromUserId, cur.callId, "call-renegotiate-answer", {
+              sdp: { type: answer.type, sdp: answer.sdp },
+            });
+          } catch {
+            // glare or stale state: caller retries
+          }
+        }
+        return;
+      }
+
+      if (eventType === "call-renegotiate-answer") {
+        const pc = localPcRef.current;
+        const sdp = payload.sdp as RTCSessionDescriptionInit | undefined;
+        if (pc && sdp && pc.signalingState === "have-local-offer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp)).catch(() => {});
+        }
+        return;
+      }
+
+      if (eventType === "ice-restart-request") {
+        forceIceRestartRef.current?.();
         return;
       }
 
@@ -1070,6 +1280,7 @@ export function OboudCallWorkspace({
       cleanupWebRtcResources,
       loadCallHistory,
       loadFriends,
+      sendSignal,
       startStatsTelemetry,
     ]
   );
