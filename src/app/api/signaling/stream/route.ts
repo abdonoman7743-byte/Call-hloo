@@ -2,6 +2,7 @@ import { db } from "@/db";
 import { signalingEvents, users } from "@/db/schema";
 import { authenticateRequest } from "@/lib/auth";
 import { and, asc, eq, inArray } from "drizzle-orm";
+import { onUserSignal } from "@/lib/signal-bus";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,17 @@ export async function GET(req: Request) {
         // ignore non-fatal update
       }
 
+      // Fast reconnect if the stream is cut (browser default is ~3s).
+      try {
+        controller.enqueue(encoder.encode("retry: 300\n\n"));
+      } catch {
+        closed = true;
+      }
+
+      let wake: (() => void) | null = null;
+      const offBus = onUserSignal(auth.sub, () => wake?.());
+      let lastBeat = Date.now();
+
       sendEvent("connected", {
         userId: auth.sub,
         username: auth.username,
@@ -73,7 +85,7 @@ export async function GET(req: Request) {
       });
 
       const startedAt = Date.now();
-      const maxDurationMs = 24000;
+      const maxDurationMs = 55000;
 
       const onAbort = () => {
         closed = true;
@@ -119,8 +131,26 @@ export async function GET(req: Request) {
           // ignore transient poll error
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 600));
+        if (Date.now() - lastBeat > 15000 && !closed) {
+          lastBeat = Date.now();
+          try {
+            controller.enqueue(encoder.encode(": ping\n\n"));
+          } catch {
+            closed = true;
+          }
+        }
+
+        // Sleep until a new signal is published or the fallback tick fires.
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 700);
+          wake = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        });
+        wake = null;
       }
+      offBus();
 
       req.signal.removeEventListener("abort", onAbort);
       if (!closed) {

@@ -22,15 +22,26 @@ export async function acquireUserOrSyntheticStream(
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 48000,
         },
         video:
           callType === "video"
             ? {
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
+                width: { ideal: 960, max: 1280 },
+                height: { ideal: 540, max: 720 },
+                frameRate: { ideal: 30, max: 30 },
                 facingMode: "user",
               }
             : false,
+      });
+
+      realStream.getAudioTracks().forEach((t) => {
+        (t as MediaStreamTrack & { contentHint?: string }).contentHint = "speech";
+      });
+      realStream.getVideoTracks().forEach((t) => {
+        (t as MediaStreamTrack & { contentHint?: string }).contentHint = "motion";
       });
 
       return {

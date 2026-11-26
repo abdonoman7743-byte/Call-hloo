@@ -46,6 +46,9 @@ interface CallStageOverlayProps {
       | "Loopback P2P";
     iceState: string;
     rttMs: number;
+    quality?: "excellent" | "good" | "poor" | "bad";
+    lossPct?: number;
+    videoTier?: number;
   } | null;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
@@ -208,7 +211,10 @@ export function CallStageOverlay({
             />
             <span className="truncate">
               {activeCall.phase === "connected"
-                ? "متصل P2P"
+                ? activeCall.iceState === "disconnected" ||
+                  activeCall.iceState === "failed"
+                  ? "انقطاع الشبكة... إعادة الاتصال"
+                  : "متصل P2P"
                 : activeCall.phase === "connecting"
                 ? "جاري الربط..."
                 : "يرن الآن..."}
@@ -232,6 +238,48 @@ export function CallStageOverlay({
               <span>
                 ICE: {activeCall.iceState} • RTT {activeCall.rttMs}ms
               </span>
+            </span>
+          )}
+
+          {activeCall.phase === "connected" && activeCall.quality && (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold ${
+                activeCall.quality === "excellent"
+                  ? "text-emerald-300"
+                  : activeCall.quality === "good"
+                  ? "text-lime-300"
+                  : activeCall.quality === "poor"
+                  ? "text-amber-300"
+                  : "text-red-400"
+              }`}
+              title={`فقد الحزم ${activeCall.lossPct ?? 0}%`}
+            >
+              <span className="flex items-end gap-[2px] h-3" aria-hidden>
+                {[1, 2, 3, 4].map((n) => (
+                  <span
+                    key={n}
+                    className="w-[3px] rounded-sm bg-current"
+                    style={{
+                      height: `${n * 25}%`,
+                      opacity:
+                        n <=
+                        { excellent: 4, good: 3, poor: 2, bad: 1 }[
+                          activeCall.quality!
+                        ]
+                          ? 1
+                          : 0.25,
+                    }}
+                  />
+                ))}
+              </span>
+              {
+                {
+                  excellent: "ممتازة",
+                  good: "جيدة",
+                  poor: "ضعيفة",
+                  bad: "سيئة جداً",
+                }[activeCall.quality]
+              }
             </span>
           )}
         </div>

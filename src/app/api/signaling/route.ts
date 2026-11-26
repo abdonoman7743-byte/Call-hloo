@@ -9,6 +9,7 @@ import {
 import { authenticateRequest } from "@/lib/auth";
 import { broadcastGlobalRealtimeEvent } from "@/lib/privacy-search";
 import { and, asc, eq, inArray } from "drizzle-orm";
+import { notifyUser } from "@/lib/signal-bus";
 
 export const dynamic = "force-dynamic";
 
@@ -192,12 +193,17 @@ export async function POST(req: Request) {
               inArray(users.id, [existingCall.callerId, existingCall.calleeId])
             );
 
-          await broadcastGlobalRealtimeEvent({
+          // Not awaited: presence fan-out must not delay the answer reaching the caller.
+          void broadcastGlobalRealtimeEvent({
             fromUserId: auth.sub,
             eventType: "presence-changed",
             payload: { userId: auth.sub, presenceStatus: "in_call" },
           });
-        } else if (eventType === "ice-candidate" && payload.candidate) {
+        } else if (
+          eventType === "ice-candidate" &&
+          payload.candidate &&
+          (sig.iceCandidates?.length ?? 0) < 8
+        ) {
           const candObj = payload.candidate as {
             candidate?: string;
             sdpMid?: string | null;
@@ -242,7 +248,7 @@ export async function POST(req: Request) {
               )
             );
 
-          await broadcastGlobalRealtimeEvent({
+          void broadcastGlobalRealtimeEvent({
             fromUserId: auth.sub,
             eventType: "presence-changed",
             payload: { userId: auth.sub, presenceStatus: "online" },
@@ -279,6 +285,7 @@ export async function POST(req: Request) {
       })
       .returning();
 
+    notifyUser(toUserId);
     return NextResponse.json({ ok: true, event: inserted });
   } catch (error) {
     console.error("POST /api/signaling error:", error);
