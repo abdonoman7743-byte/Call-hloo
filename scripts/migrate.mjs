@@ -1,4 +1,5 @@
-// Applies pending drizzle migrations before the server starts.
+// Applies pending Drizzle migrations only when explicitly invoked with `npm run migrate`.
+// This is intentionally not part of build, start, preview, or deploy commands.
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
@@ -12,8 +13,9 @@ const pool = new pg.Pool({ connectionString: url });
 try {
   await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
   console.log("migrations applied");
-} catch (e) {
-  console.error("migration failed:", e);
+} catch {
+  // Avoid logging driver errors: they can include connection details.
+  console.error("migration failed; check database connectivity and migration files");
   process.exitCode = 1;
 } finally {
   await pool.end();
