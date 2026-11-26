@@ -38,7 +38,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       dir="rtl"
       className={`${cairo.variable} ${jetbrainsMono.variable}`}
     >
-      <body className="min-h-[100dvh] bg-[#F8FAFC] text-[#0F172A] antialiased selection:bg-emerald-600 selection:text-white">
+      <body className="min-h-[100dvh] text-[#0B2B22] antialiased selection:bg-emerald-600 selection:text-white">
         {children}
       </body>
     </html>

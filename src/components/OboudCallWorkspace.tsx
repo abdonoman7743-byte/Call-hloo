@@ -14,6 +14,7 @@ import {
   Phone,
   PhoneCall,
   Search,
+  Settings,
   Send,
   ShieldCheck,
   Square,
@@ -1551,7 +1552,7 @@ export function OboudCallWorkspace({
   const isInsideMobileConversation = activeNav === "chats" && mobileChatOpen;
 
   return (
-    <div className="h-[100dvh] flex flex-col overflow-hidden bg-[#F8FAFC]">
+    <div className="ui-shell h-[100dvh] flex flex-col overflow-hidden">
       {/* Top Bar (Hidden on mobile only when deep inside an open chat room for 100% screen space) */}
       <header
         className={`h-15 sm:h-16 shrink-0 bg-white border-b border-slate-200 px-3.5 sm:px-6 items-center justify-between gap-3 z-20 ${
@@ -1726,14 +1727,14 @@ export function OboudCallWorkspace({
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="ابحث في محادثاتك..."
-                      className="w-full h-11 rounded-2xl bg-slate-100/80 border border-slate-200/70 pr-10 pl-3.5 text-base sm:text-sm focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500"
+                      className="ui-search w-full h-12 rounded-full bg-slate-100/80 border border-slate-200/70 pr-11 pl-4 text-base sm:text-sm focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500"
                     />
                   </div>
                   <button
                     type="button"
                     onClick={() => setActiveNav("friends")}
                     title="اكتشف الأشخاص على المنصة"
-                    className="h-11 px-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 shadow-2xs transition cursor-pointer"
+                    className="ui-fab h-12 px-4 rounded-full text-white text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 shadow-2xs transition cursor-pointer"
                   >
                     <UserPlus className="w-4 h-4" />
                     <span className="hidden xs:inline sm:inline">اكتشف</span>
@@ -1741,7 +1742,7 @@ export function OboudCallWorkspace({
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto divide-y divide-slate-100 pb-20 md:pb-0">
+              <div className="flex-1 overflow-y-auto ui-list space-y-2.5 p-3 pb-28 md:pb-3">
                 {/* Pinned Public Group Chat Room */}
                 {showGroupInList && (
                   <div
@@ -1749,14 +1750,14 @@ export function OboudCallWorkspace({
                       setSelectedPeer(TEAM_GROUP_CONTACT);
                       setMobileChatOpen(true);
                     }}
-                    className={`p-3.5 sm:p-4 flex items-center justify-between gap-3 transition cursor-pointer ${
+                    className={`ui-group-card p-3.5 sm:p-4 flex items-center justify-between gap-3 transition cursor-pointer ${
                       selectedPeer?.id === TEAM_GROUP_CONTACT.id
                         ? "md:bg-indigo-50/70 md:border-r-4 md:border-indigo-600 hover:bg-slate-50"
                         : "hover:bg-slate-50"
                     }`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white flex items-center justify-center shadow-2xs shrink-0">
+                      <div className="ui-icon-3d w-14 h-14 rounded-2xl text-white flex items-center justify-center shrink-0">
                         <UsersRound className="w-6 h-6" />
                       </div>
                       <div className="min-w-0">
@@ -1808,7 +1809,7 @@ export function OboudCallWorkspace({
                           setSelectedPeer(friend);
                           setMobileChatOpen(true);
                         }}
-                        className={`p-3.5 sm:p-4 flex items-center justify-between gap-3 transition cursor-pointer ${
+                        className={`ui-chat-card p-3.5 sm:p-4 flex items-center justify-between gap-3 transition cursor-pointer ${
                           isSelected
                             ? "md:bg-emerald-50/70 md:border-r-4 md:border-emerald-600 hover:bg-slate-50"
                             : "hover:bg-slate-50"
@@ -1821,7 +1822,7 @@ export function OboudCallWorkspace({
                                 friend.avatarUrl || "/images/sara-avatar.jpg"
                               }
                               alt={friend.displayName}
-                              className="w-12 h-12 rounded-full object-cover border border-slate-200"
+                              className="ui-avatar-3d w-13 h-13 rounded-full object-cover"
                             />
                             <span
                               className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-white ${
@@ -2221,15 +2222,15 @@ export function OboudCallWorkspace({
 
       {/* Mobile Fixed Bottom Navigation Bar (Hidden on Desktop and when inside open mobile chat room) */}
       {!isInsideMobileConversation && (
-        <nav className="md:hidden h-16 shrink-0 bg-white border-t border-slate-200 grid grid-cols-5 px-1 z-20">
+        <nav className="ui-floatnav md:hidden grid grid-cols-5 z-20">
           <button
             type="button"
             onClick={() => {
               setActiveNav("chats");
               setMobileChatOpen(false);
             }}
-            className={`flex flex-col items-center justify-center gap-1 text-[10px] font-extrabold transition cursor-pointer ${
-              activeNav === "chats" ? "text-emerald-600" : "text-slate-500"
+            className={`ui-navbtn ${
+              activeNav === "chats" ? "is-active" : ""
             }`}
           >
             <MessageSquare className="w-5 h-5" />
@@ -2239,8 +2240,8 @@ export function OboudCallWorkspace({
           <button
             type="button"
             onClick={() => setActiveNav("friends")}
-            className={`relative flex flex-col items-center justify-center gap-1 text-[10px] font-extrabold transition cursor-pointer ${
-              activeNav === "friends" ? "text-indigo-600" : "text-slate-500"
+            className={`relative ui-navbtn ${
+              activeNav === "friends" ? "is-active" : ""
             }`}
           >
             <Compass className="w-5 h-5" />
@@ -2258,8 +2259,8 @@ export function OboudCallWorkspace({
               setActiveNav("calls");
               loadCallHistory();
             }}
-            className={`flex flex-col items-center justify-center gap-1 text-[10px] font-extrabold transition cursor-pointer ${
-              activeNav === "calls" ? "text-sky-600" : "text-slate-500"
+            className={`ui-navbtn ${
+              activeNav === "calls" ? "is-active" : ""
             }`}
           >
             <Phone className="w-5 h-5" />
@@ -2269,8 +2270,17 @@ export function OboudCallWorkspace({
           <button
             type="button"
             onClick={() => setActiveNav("profile")}
-            className={`flex flex-col items-center justify-center gap-1 text-[10px] font-extrabold transition cursor-pointer ${
-              activeNav === "profile" ? "text-teal-600" : "text-slate-500"
+            className="ui-navbtn"
+          >
+            <Settings className="w-5 h-5" />
+            <span>الإعدادات</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveNav("profile")}
+            className={`ui-navbtn ${
+              activeNav === "profile" ? "is-active" : ""
             }`}
           >
             <UserCog className="w-5 h-5" />
